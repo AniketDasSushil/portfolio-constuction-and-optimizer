@@ -57,17 +57,22 @@ if btn:
     st.session_state.data = yf.download(ticker,period=f'{per}y')['Adj Close']
     data = st.session_state.data
     st.session_state.portfolio = run(ticker,weight,data)
-    st.line_chart(st.session_state.portfolio)
+    plt.plot(st.session_state.portfolio)
+    fig = plt.show()
+    st.pyplot(fig)
 compare = st.radio('Compare with market',['No','Yes'])
 
 if compare == 'Yes':
+    amt = st.number_input('enter initial investment')
     portfolio = st.session_state.portfolio
     data = st.session_state.data
     st.subheader(f'Your portfolio retuns vs nifty')
     comparision = comp(data)
-    
     st.session_state.full = pd.concat([comparision,portfolio],axis=1)
-    st.line_chart(st.session_state.full)
+    plt.plot(st.session_state.full)
+    plt.legend(st.session_state.full)
+    fig = plt.show()
+    st.pyplot(fig)
 st.header('Portfoli optimization using Markowitz model')
 scenario = st.slider('No. of scenarios',min_value=100,max_value=1000)
 start = st.button('Start')
