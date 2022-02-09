@@ -31,21 +31,29 @@ def comp(data):
     cumm = (1+ret).cumprod()
     cumm.rename('^NSEI',inplace=True)
     return cumm
+@st.cache(allow_output_mutation=True)
+def indi(data):
+    ret = data.pct_change()
+    cumm = (1+ret).cumprod()
+    return cumm
 
 st.title('Portfolio Constructor and Optimizer')
 st.subheader('type ".ns" after every stock symbol')
-st.text('to find stock symbols click on below link')
-st.markdown('https://en.wikipedia.org/wiki/NIFTY_50#Constituents')
+
 
 n = st.number_input('type the number of stocks in your portfolio',min_value=2,
                    max_value=10)
-per = st.slider('period',min_value=1,max_value=10)
+per = st.slider('number of years',min_value=1,max_value=10)
 n = int(n)
-
-for i in range(0,n):
-    name = st.text_input(f'type the name of the stock:- {i}')
-    w = st.number_input(f'type the weight of {i}')
-    ticker.append(name)
+st.session_state.sym = pd.read_csv('sym.csv')
+sym = st.session_state.sym
+sym.columns = [column.replace(" ",'_') for column in sym.columns]
+for i in range(1,n+1):
+    name = st.selectbox(f'select the stock: - {1}',sym['NAME_OF_COMPANY'],key=i)
+    w = st.number_input(f'type the weight of {name}',key=i)
+    tick = sym.query('NAME_OF_COMPANY == @name')
+    key = tick["SYMBOL"].to_list()
+    ticker.append(key[0]+".NS")
     weight.append(w)
 if sum(weight) != 1:
     st.warning('Warning: weight should add up to 1')
@@ -63,7 +71,6 @@ if btn:
 compare = st.radio('Compare with market',['No','Yes'])
 
 if compare == 'Yes':
-    amt = st.number_input('enter initial investment')
     portfolio = st.session_state.portfolio
     data = st.session_state.data
     st.subheader(f'Your portfolio retuns vs nifty')
@@ -73,8 +80,20 @@ if compare == 'Yes':
     plt.legend(st.session_state.full)
     fig = plt.show()
     st.pyplot(fig)
-st.header('Portfoli optimization using Markowitz model')
-scenario = st.slider('No. of scenarios',min_value=100,max_value=1000)
+    
+st.header('Portfolio Metrics')
+click = st.button('Find')
+if click:
+    plt.pie(weight,labels=ticker,autopct='%1.1f%%')
+    plt.title('portfolio composition')
+    st.pyplot(plt.show())
+    st.subheader('performance of individual stocks in your portfolio')
+    plt.plot(indi(data))
+    plt.xticks(rotation=90)
+    plt.legend(indi(data))
+    st.pyplot(plt.show())
+st.header('Portfolio optimization using Markowitz model')
+scenario = st.slider('No. of scenarios',min_value=500,max_value=5000)
 start = st.button('Start')
 if start:
     x = data.pct_change()
@@ -104,7 +123,8 @@ if start:
     max_r = np.argmax(p_returns)
     plt.scatter(p_risk, p_returns, c=p_sharpe, cmap='plasma')
     plt.colorbar(label='Sharpe Ratio')
-
+    plt.xlabel('Risk')
+    plt.ylabel('Return')
     plt.scatter(p_risk[max_ind], p_returns[max_ind], color='r',  marker='*', s=500)
     opt = p_weights[max_ind]
     opt2 = np.round(opt,2)
