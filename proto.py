@@ -1,11 +1,10 @@
-#importing required libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import yfinance as yf
 # configuring the display
-st.set_page_config(layout='wide')
 st.set_option('deprecation.showPyplotGlobalUse', False)
 #defining some functions
 @st.cache(allow_output_mutation=True)
@@ -61,7 +60,6 @@ def metrics(df):
     capm['alpha'] = capm['cagr']-capm['capm']
     capm['mean returns'] = list_mean
     capm['correlation'] = list_corr
-    capm['R squared'] = [x*x for x in list_corr]
     capm = np.round(capm,4)
     capm = capm.astype(str)
     capm = capm.transpose()
@@ -81,7 +79,7 @@ st.title('Portfolio Constructor, Analyzer and Optimizer')
 n = st.slider('select the number of stocks in your portfolio',min_value=2,
                    max_value=20)
 yr = st.slider('number of years',min_value=1,max_value=20)
-
+sector = []
 for i in range(1,n+1):
     name = st.selectbox(f'select the stock: - {1}',sym['NAME_OF_COMPANY'],key=i)
     w = st.number_input(f'type the weight of {name}',key=i,step=5)
@@ -89,11 +87,14 @@ for i in range(1,n+1):
     key = tick["SYMBOL"].to_list()
     ticker.append(key[0]+".NS")
     st.session_state.weight.append(w)
+    sector.append(tick['SECTOR'].to_list()[0])
+    
 if sum(st.session_state.weight) != 100:
     st.warning('Warning: weight should add up to 100')
     st.text(sum(st.session_state.weight))
     
 btn = st.button('Confirm')
+
 
 if btn:
     st.session_state.weight = st.session_state.weight/np.sum(st.session_state.weight)
@@ -117,8 +118,13 @@ if compare == 'yes':
     st.pyplot(fig)
 st.header('Portfolio Metrics')
 click = st.button('Find')
+
+
 if click:
-    plt.pie(st.session_state.weight,labels=ticker,autopct='%1.1f%%')
+   # for i in ticker:
+     #   k = yf.Ticker(i)
+     #   k.
+    plt.pie(st.session_state.weight,labels=sector,autopct='%1.1f%%')
     plt.title('portfolio composition')
     st.pyplot(plt.show())
     st.subheader('performance of individual stocks in your portfolio')
@@ -126,11 +132,16 @@ if click:
     plt.xticks(rotation=45)
     plt.legend(cumm(st.session_state.data))
     st.pyplot(plt.show())
+    st.subheader('Correlation between stocks in portfolio')
+    sns.heatmap(st.session_state.data.corr(),annot=True)
+    st.pyplot(plt.show())
     m = metrics(compare)
     st.table(m)
 st.header('Portfolio optimization using Markowitz model')
 scenario = st.slider('No. of scenarios',min_value=500,max_value=5000)
 start = st.button('Start')
+
+
 if start:
     x = st.session_state.data.pct_change()
     p_weights = []
@@ -168,5 +179,3 @@ if start:
 
 output = plt.show()
 st.pyplot(output)
-
-
