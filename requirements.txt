@@ -6,3 +6,4 @@ matplotlib-inline==0.1.3
 streamlit==1.5.0
 seaborn 
 protobuf==3.20.3
+altair
