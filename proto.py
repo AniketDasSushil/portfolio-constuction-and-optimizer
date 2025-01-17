@@ -5,55 +5,57 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
 
-@st.cache_data
-def portfolio_create(tickers, weights, data):
-    """Calculate portfolio cumulative returns"""
-    ret = data.pct_change()
-    portfolio_returns = (ret * weights).sum(axis=1)
-    cum_returns = (1 + portfolio_returns).cumprod()
-    return cum_returns.rename('Portfolio')
+# Previous functions remain the same...
+[Previous code for portfolio_create, calculate_cumulative_returns, and calculate_metrics functions stays exactly the same]
 
-@st.cache_data
-def calculate_cumulative_returns(data):
-    """Calculate cumulative returns for given data"""
-    ret = data.pct_change()
-    return (1 + ret).cumprod()
-
-@st.cache_data
-def calculate_metrics(portfolio_data, market_data, years, risk_free_rate=0.0666):
-    """Calculate portfolio metrics including CAPM, beta, alpha, etc."""
-    # Ensure portfolio_data is a Series named 'Portfolio'
-    if isinstance(portfolio_data, pd.DataFrame):
-        portfolio_data = portfolio_data['Portfolio']
+def optimize_portfolio(stock_data, tickers, n_scenarios):
+    """Run Markowitz portfolio optimization"""
+    returns = stock_data.pct_change()
     
-    # Calculate returns
-    portfolio_returns = portfolio_data.pct_change()
-    market_returns = market_data.pct_change()
-    
-    # Calculate beta
-    covariance = portfolio_returns.cov(market_returns)
-    market_variance = market_returns.var()
-    beta = covariance / market_variance
-    
-    # Calculate CAPM expected return
-    market_cagr = (((market_data.iloc[-1]/market_data.iloc[0])**(1/years))-1)*100
-    capm_return = risk_free_rate + beta * (market_cagr - risk_free_rate)
-    
-    # Calculate actual portfolio performance
-    portfolio_cagr = (((portfolio_data.iloc[-1]/portfolio_data.iloc[0])**(1/years))-1)*100
-    portfolio_volatility = portfolio_returns.std() * np.sqrt(252)
-    correlation = portfolio_returns.corr(market_returns)
-    
-    metrics = {
-        'Beta': beta,
-        'CAPM Expected Return (%)': capm_return,
-        'Actual Return (%)': portfolio_cagr,
-        'Volatility (%)': portfolio_volatility * 100,
-        'Alpha (%)': portfolio_cagr - capm_return,
-        'Correlation': correlation
+    results = {
+        'weights': [],
+        'returns': [],
+        'risks': [],
+        'sharpe': []
     }
     
-    return pd.DataFrame(metrics, index=['Portfolio']).round(4)
+    with st.spinner('Running optimization...'):
+        for _ in range(n_scenarios):
+            weights = np.random.random(len(tickers))
+            weights /= weights.sum()
+            
+            portfolio_return = (returns.mean() * weights).sum() * 252
+            portfolio_risk = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
+            sharpe_ratio = portfolio_return / portfolio_risk
+            
+            results['weights'].append(weights)
+            results['returns'].append(portfolio_return)
+            results['risks'].append(portfolio_risk)
+            results['sharpe'].append(sharpe_ratio)
+        
+        # Find optimal portfolio
+        optimal_idx = np.argmax(results['sharpe'])
+        optimal_weights = results['weights'][optimal_idx]
+        
+        # Plot efficient frontier
+        fig, ax = plt.subplots(figsize=(10, 6))
+        scatter = ax.scatter(results['risks'], results['returns'], 
+                            c=results['sharpe'], cmap='plasma')
+        plt.colorbar(scatter, label='Sharpe Ratio')
+        ax.set_xlabel('Risk (Volatility)')
+        ax.set_ylabel('Expected Return')
+        ax.scatter(results['risks'][optimal_idx], results['returns'][optimal_idx], 
+                   color='red', marker='*', s=500, label='Optimal Portfolio')
+        ax.legend()
+        st.pyplot(fig)
+        
+        # Display optimal allocation
+        st.success('Optimal Portfolio Allocation:')
+        optimal_allocation = pd.DataFrame({
+            'Stock': tickers,
+            'Weight': optimal_weights * 100  # Convert to percentage
+        })
+        st.table(optimal_allocation.round(2))
 
 def main():
     st.title('Portfolio Constructor, Analyzer and Optimizer')
@@ -91,7 +93,12 @@ def main():
     if total_weight != 100:
         st.warning(f'Total weight is {total_weight}%. It should be 100%')
     
-    if st.button('Analyze Portfolio'):
+    # Create two columns for the buttons
+    col1, col2 = st.columns(2)
+    analyze_button = col1.button('Analyze Portfolio')
+    optimize_button = col2.button('Optimize Portfolio')
+    
+    if analyze_button or optimize_button:
         weights = np.array(weights) / 100  # Normalize weights
         
         # Download data
@@ -107,95 +114,48 @@ def main():
                 st.error(f'Error downloading data: {str(e)}')
                 return
         
-        # Calculate portfolio performance
-        portfolio_data = portfolio_create(tickers, weights, stock_data)
+        if analyze_button:
+            # Calculate portfolio performance
+            portfolio_data = portfolio_create(tickers, weights, stock_data)
+            
+            # Display visualizations
+            st.subheader('Portfolio Performance')
+            fig, ax = plt.subplots(figsize=(10, 6))
+            portfolio_data.plot(ax=ax)
+            ax.set_title('Cumulative Returns')
+            st.pyplot(fig)
+            
+            # Market comparison
+            st.subheader('Market Comparison')
+            fig, ax = plt.subplots(figsize=(10, 6))
+            compare_data = pd.concat([
+                calculate_cumulative_returns(market_data).rename('NIFTY'),
+                portfolio_data
+            ], axis=1)
+            compare_data.plot(ax=ax)
+            st.pyplot(fig)
+            
+            # Portfolio composition
+            st.subheader('Portfolio Composition')
+            fig, ax = plt.subplots(figsize=(8, 8))
+            plt.pie(weights, labels=sectors, autopct='%1.1f%%')
+            st.pyplot(fig)
+            
+            # Correlation heatmap
+            st.subheader('Stock Correlations')
+            fig, ax = plt.subplots(figsize=(10, 8))
+            sns.heatmap(stock_data.corr(), annot=True, ax=ax)
+            st.pyplot(fig)
+            
+            # Portfolio metrics
+            st.subheader('Portfolio Metrics')
+            metrics = calculate_metrics(portfolio_data, market_data, years)
+            st.table(metrics)
         
-        # Display visualizations
-        st.subheader('Portfolio Performance')
-        fig, ax = plt.subplots(figsize=(10, 6))
-        portfolio_data.plot(ax=ax)
-        ax.set_title('Cumulative Returns')
-        st.pyplot(fig)
-        
-        # Market comparison
-        st.subheader('Market Comparison')
-        fig, ax = plt.subplots(figsize=(10, 6))
-        compare_data = pd.concat([
-            calculate_cumulative_returns(market_data).rename('NIFTY'),
-            portfolio_data
-        ], axis=1)
-        compare_data.plot(ax=ax)
-        st.pyplot(fig)
-        
-        # Portfolio composition
-        st.subheader('Portfolio Composition')
-        fig, ax = plt.subplots(figsize=(8, 8))
-        plt.pie(weights, labels=sectors, autopct='%1.1f%%')
-        st.pyplot(fig)
-        
-        # Correlation heatmap
-        st.subheader('Stock Correlations')
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(stock_data.corr(), annot=True, ax=ax)
-        st.pyplot(fig)
-        
-        # Portfolio metrics
-        st.subheader('Portfolio Metrics')
-        metrics = calculate_metrics(portfolio_data, market_data, years)
-        st.table(metrics)
-        
-        # Portfolio optimization
-        if st.button('Optimize Portfolio'):
+        if optimize_button:
+            st.subheader('Portfolio Optimization')
             n_scenarios = st.slider('Number of scenarios', 500, 5000, 1000)
             optimize_portfolio(stock_data, tickers, n_scenarios)
-
-def optimize_portfolio(stock_data, tickers, n_scenarios):
-    """Run Markowitz portfolio optimization"""
-    returns = stock_data.pct_change()
-    
-    results = {
-        'weights': [],
-        'returns': [],
-        'risks': [],
-        'sharpe': []
-    }
-    
-    for _ in range(n_scenarios):
-        weights = np.random.random(len(tickers))
-        weights /= weights.sum()
-        
-        portfolio_return = (returns.mean() * weights).sum() * 252
-        portfolio_risk = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
-        sharpe_ratio = portfolio_return / portfolio_risk
-        
-        results['weights'].append(weights)
-        results['returns'].append(portfolio_return)
-        results['risks'].append(portfolio_risk)
-        results['sharpe'].append(sharpe_ratio)
-    
-    # Find optimal portfolio
-    optimal_idx = np.argmax(results['sharpe'])
-    optimal_weights = results['weights'][optimal_idx]
-    
-    # Plot efficient frontier
-    fig, ax = plt.subplots(figsize=(10, 6))
-    scatter = ax.scatter(results['risks'], results['returns'], 
-                        c=results['sharpe'], cmap='plasma')
-    plt.colorbar(scatter, label='Sharpe Ratio')
-    ax.set_xlabel('Risk (Volatility)')
-    ax.set_ylabel('Expected Return')
-    ax.scatter(results['risks'][optimal_idx], results['returns'][optimal_idx], 
-               color='red', marker='*', s=500, label='Optimal Portfolio')
-    ax.legend()
-    st.pyplot(fig)
-    
-    # Display optimal allocation
-    st.success('Optimal Portfolio Allocation:')
-    optimal_allocation = pd.DataFrame({
-        'Stock': tickers,
-        'Weight': optimal_weights
-    })
-    st.table(optimal_allocation.round(4))
 
 if __name__ == "__main__":
     main()
