@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
 
-# Cache decorators should use hash_funcs for mutable data
 @st.cache_data
 def portfolio_create(tickers, weights, data):
     """Calculate portfolio cumulative returns"""
@@ -21,26 +20,29 @@ def calculate_cumulative_returns(data):
     return (1 + ret).cumprod()
 
 @st.cache_data
-def calculate_metrics(portfolio_data, market_data, risk_free_rate=0.0666):
+def calculate_metrics(portfolio_data, market_data, years, risk_free_rate=0.0666):
     """Calculate portfolio metrics including CAPM, beta, alpha, etc."""
+    # Ensure portfolio_data is a Series named 'Portfolio'
+    if isinstance(portfolio_data, pd.DataFrame):
+        portfolio_data = portfolio_data['Portfolio']
+    
     # Calculate returns
     portfolio_returns = portfolio_data.pct_change()
     market_returns = market_data.pct_change()
     
     # Calculate beta
-    covariance = portfolio_returns['Portfolio'].cov(market_returns)
+    covariance = portfolio_returns.cov(market_returns)
     market_variance = market_returns.var()
     beta = covariance / market_variance
     
     # Calculate CAPM expected return
-    years = (portfolio_data.index[-1] - portfolio_data.index[0]).days / 365
-    market_cagr = (((market_data[-1]/market_data[0])**(1/years))-1)*100
+    market_cagr = (((market_data.iloc[-1]/market_data.iloc[0])**(1/years))-1)*100
     capm_return = risk_free_rate + beta * (market_cagr - risk_free_rate)
     
     # Calculate actual portfolio performance
-    portfolio_cagr = (((portfolio_data[-1]/portfolio_data[0])**(1/years))-1)*100
-    portfolio_volatility = portfolio_returns['Portfolio'].std() * np.sqrt(252)
-    correlation = portfolio_returns['Portfolio'].corr(market_returns)
+    portfolio_cagr = (((portfolio_data.iloc[-1]/portfolio_data.iloc[0])**(1/years))-1)*100
+    portfolio_volatility = portfolio_returns.std() * np.sqrt(252)
+    correlation = portfolio_returns.corr(market_returns)
     
     metrics = {
         'Beta': beta,
@@ -94,11 +96,15 @@ def main():
         
         # Download data
         with st.spinner('Downloading data...'):
-            stock_data = yf.download(tickers, period=f'{years}y')['Adj Close']
-            market_data = yf.download('^NSEI', period=f'{years}y')['Adj Close']
-            
-            if stock_data.empty or market_data.empty:
-                st.error('Failed to download data!')
+            try:
+                stock_data = yf.download(tickers, period=f'{years}y')['Adj Close']
+                market_data = yf.download('^NSEI', period=f'{years}y')['Adj Close']
+                
+                if stock_data.empty or market_data.empty:
+                    st.error('Failed to download data!')
+                    return
+            except Exception as e:
+                st.error(f'Error downloading data: {str(e)}')
                 return
         
         # Calculate portfolio performance
@@ -135,10 +141,7 @@ def main():
         
         # Portfolio metrics
         st.subheader('Portfolio Metrics')
-        metrics = calculate_metrics(
-            pd.DataFrame(portfolio_data),
-            market_data
-        )
+        metrics = calculate_metrics(portfolio_data, market_data, years)
         st.table(metrics)
         
         # Portfolio optimization
