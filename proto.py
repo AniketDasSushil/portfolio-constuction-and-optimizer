@@ -5,160 +5,194 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
 
-# Configuring Caching Functions
+# Cache decorators should use hash_funcs for mutable data
 @st.cache_data
-def fetch_stock_data(tickers, years):
-    return yf.download(tickers, period=f'{years}y')['Adj Close']
-
-@st.cache_data
-def compute_cumulative_returns(data):
-    returns = data.pct_change()
-    cumulative = (1 + returns).cumprod()
-    return cumulative
+def portfolio_create(tickers, weights, data):
+    """Calculate portfolio cumulative returns"""
+    ret = data.pct_change()
+    portfolio_returns = (ret * weights).sum(axis=1)
+    cum_returns = (1 + portfolio_returns).cumprod()
+    return cum_returns.rename('Portfolio')
 
 @st.cache_data
-def calculate_portfolio_metrics(portfolio_data, market_data, years):
-    ret = portfolio_data.pct_change()
-    market_ret = market_data.pct_change()
+def calculate_cumulative_returns(data):
+    """Calculate cumulative returns for given data"""
+    ret = data.pct_change()
+    return (1 + ret).cumprod()
 
-    # Portfolio Metrics
-    mean_ret = ret.mean() * 252
-    vol = ret.std() * np.sqrt(252)
-    sharpe_ratio = mean_ret / vol
-
-    # Beta Calculation
-    cov = ret.cov()
-    beta = cov.iloc[0, 1] / market_ret.var()
-
-    # CAPM and Alpha
-    market_return = ((market_data.iloc[-1] / market_data.iloc[0]) ** (1 / years) - 1) * 100
-    risk_free_rate = 6.66
-    capm_return = risk_free_rate + beta * (market_return - risk_free_rate)
-    alpha = mean_ret * 100 - capm_return
-
-    return {
-        "Mean Return": mean_ret,
-        "Volatility": vol,
-        "Sharpe Ratio": sharpe_ratio,
-        "Beta": beta,
-        "CAPM Return": capm_return,
-        "Alpha": alpha
+@st.cache_data
+def calculate_metrics(portfolio_data, market_data, risk_free_rate=0.0666):
+    """Calculate portfolio metrics including CAPM, beta, alpha, etc."""
+    # Calculate returns
+    portfolio_returns = portfolio_data.pct_change()
+    market_returns = market_data.pct_change()
+    
+    # Calculate beta
+    covariance = portfolio_returns['Portfolio'].cov(market_returns)
+    market_variance = market_returns.var()
+    beta = covariance / market_variance
+    
+    # Calculate CAPM expected return
+    years = (portfolio_data.index[-1] - portfolio_data.index[0]).days / 365
+    market_cagr = (((market_data[-1]/market_data[0])**(1/years))-1)*100
+    capm_return = risk_free_rate + beta * (market_cagr - risk_free_rate)
+    
+    # Calculate actual portfolio performance
+    portfolio_cagr = (((portfolio_data[-1]/portfolio_data[0])**(1/years))-1)*100
+    portfolio_volatility = portfolio_returns['Portfolio'].std() * np.sqrt(252)
+    correlation = portfolio_returns['Portfolio'].corr(market_returns)
+    
+    metrics = {
+        'Beta': beta,
+        'CAPM Expected Return (%)': capm_return,
+        'Actual Return (%)': portfolio_cagr,
+        'Volatility (%)': portfolio_volatility * 100,
+        'Alpha (%)': portfolio_cagr - capm_return,
+        'Correlation': correlation
     }
+    
+    return pd.DataFrame(metrics, index=['Portfolio']).round(4)
 
-# Streamlit App Title
-st.title('Portfolio Constructor, Analyzer, and Optimizer')
-
-# Load Symbol Data
-sym = pd.read_csv('sym.csv')
-sym.columns = [column.replace(' ', '_') for column in sym.columns]
-
-# User Inputs
-n = st.slider('Select the number of stocks in your portfolio', min_value=2, max_value=20, step=1)
-years = st.slider('Select the number of years for analysis', min_value=1, max_value=20, step=1)
-
-# Initialize Variables
-tickers = []
-weights = []
-sectors = []
-
-# Stock Selection
-for i in range(n):
-    stock_name = st.selectbox(f'Select Stock {i + 1}', sym['NAME_OF_COMPANY'], key=f'stock_{i}')
-    weight = st.number_input(f'Enter Weight for {stock_name} (%)', min_value=0, max_value=100, step=1, key=f'weight_{i}')
-
-    # Fetch ticker and sector
-    selected_stock = sym[sym['NAME_OF_COMPANY'] == stock_name]
-    tickers.append(selected_stock['SYMBOL'].iloc[0] + ".NS")
-    weights.append(weight)
-    sectors.append(selected_stock['SECTOR'].iloc[0])
-
-# Check Total Weight
-if sum(weights) != 100:
-    st.warning(f'Total weights must sum to 100%. Current total: {sum(weights)}%.')
-
-# Confirm Button
-if st.button('Confirm Portfolio'):
-    weights = np.array(weights) / 100  # Normalize weights
-
-    # Fetch Data
-    stock_data = fetch_stock_data(tickers, years)
-    market_data = fetch_stock_data(['^NSEI'], years)
-
-    # Calculate Portfolio Returns
-    portfolio_returns = (stock_data.pct_change() * weights).sum(axis=1)
-    cumulative_portfolio = (1 + portfolio_returns).cumprod()
-
-    # Plot Cumulative Returns
-    fig, ax = plt.subplots()
-    ax.plot(cumulative_portfolio, label='Portfolio')
-    ax.set_title('Cumulative Returns of Your Portfolio')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Cumulative Return')
-    ax.legend()
-    st.pyplot(fig)
-
-    # Compare with Market
-    compare = st.radio('Compare Portfolio with Market?', ['No', 'Yes'])
-    if compare == 'Yes':
-        cumulative_market = compute_cumulative_returns(market_data)
-        cumulative_market.rename(columns={'Adj Close': 'Market'}, inplace=True)
-        comparison = pd.concat([cumulative_portfolio, cumulative_market], axis=1)
-
-        fig, ax = plt.subplots()
-        comparison.plot(ax=ax)
-        ax.set_title('Portfolio vs Market Cumulative Returns')
-        ax.legend(['Portfolio', 'Market'])
+def main():
+    st.title('Portfolio Constructor, Analyzer and Optimizer')
+    
+    # Load symbol data
+    try:
+        sym = pd.read_csv('sym.csv')
+        sym.columns = [col.replace(" ", '_') for col in sym.columns]
+    except FileNotFoundError:
+        st.error("Symbol data file 'sym.csv' not found!")
+        return
+    
+    # Portfolio construction inputs
+    n_stocks = st.slider('Select number of stocks', 2, 20)
+    years = st.slider('Number of years', 1, 20)
+    
+    # Stock selection and weight input
+    tickers = []
+    weights = []
+    sectors = []
+    
+    for i in range(n_stocks):
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            name = st.selectbox(f'Select stock #{i+1}', sym['NAME_OF_COMPANY'], key=f'stock_{i}')
+            stock_data = sym[sym['NAME_OF_COMPANY'] == name].iloc[0]
+            tickers.append(f"{stock_data['SYMBOL']}.NS")
+            sectors.append(stock_data['SECTOR'])
+        
+        with col2:
+            weight = st.number_input(f'Weight (%)', key=f'weight_{i}', min_value=0.0, max_value=100.0, step=5.0)
+            weights.append(weight)
+    
+    total_weight = sum(weights)
+    if total_weight != 100:
+        st.warning(f'Total weight is {total_weight}%. It should be 100%')
+    
+    if st.button('Analyze Portfolio'):
+        weights = np.array(weights) / 100  # Normalize weights
+        
+        # Download data
+        with st.spinner('Downloading data...'):
+            stock_data = yf.download(tickers, period=f'{years}y')['Adj Close']
+            market_data = yf.download('^NSEI', period=f'{years}y')['Adj Close']
+            
+            if stock_data.empty or market_data.empty:
+                st.error('Failed to download data!')
+                return
+        
+        # Calculate portfolio performance
+        portfolio_data = portfolio_create(tickers, weights, stock_data)
+        
+        # Display visualizations
+        st.subheader('Portfolio Performance')
+        fig, ax = plt.subplots(figsize=(10, 6))
+        portfolio_data.plot(ax=ax)
+        ax.set_title('Cumulative Returns')
         st.pyplot(fig)
+        
+        # Market comparison
+        st.subheader('Market Comparison')
+        fig, ax = plt.subplots(figsize=(10, 6))
+        compare_data = pd.concat([
+            calculate_cumulative_returns(market_data).rename('NIFTY'),
+            portfolio_data
+        ], axis=1)
+        compare_data.plot(ax=ax)
+        st.pyplot(fig)
+        
+        # Portfolio composition
+        st.subheader('Portfolio Composition')
+        fig, ax = plt.subplots(figsize=(8, 8))
+        plt.pie(weights, labels=sectors, autopct='%1.1f%%')
+        st.pyplot(fig)
+        
+        # Correlation heatmap
+        st.subheader('Stock Correlations')
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(stock_data.corr(), annot=True, ax=ax)
+        st.pyplot(fig)
+        
+        # Portfolio metrics
+        st.subheader('Portfolio Metrics')
+        metrics = calculate_metrics(
+            pd.DataFrame(portfolio_data),
+            market_data
+        )
+        st.table(metrics)
+        
+        # Portfolio optimization
+        if st.button('Optimize Portfolio'):
+            n_scenarios = st.slider('Number of scenarios', 500, 5000, 1000)
+            optimize_portfolio(stock_data, tickers, n_scenarios)
 
-    # Portfolio Composition
-    fig, ax = plt.subplots()
-    ax.pie(weights, labels=sectors, autopct='%1.1f%%')
-    ax.set_title('Portfolio Composition by Sector')
-    st.pyplot(fig)
-
-    # Metrics Calculation
-    metrics = calculate_portfolio_metrics(cumulative_portfolio, market_data, years)
-    st.subheader('Portfolio Metrics')
-    st.table(metrics)
-
-# Portfolio Optimization (Markowitz Model)
-scenarios = st.slider('Select the Number of Scenarios for Optimization', min_value=500, max_value=5000, step=500)
-
-if st.button('Start Optimization'):
+def optimize_portfolio(stock_data, tickers, n_scenarios):
+    """Run Markowitz portfolio optimization"""
     returns = stock_data.pct_change()
-    p_weights = []
-    p_returns = []
-    p_risks = []
-    p_sharpe = []
-
-    for _ in range(scenarios):
-        wts = np.random.random(len(tickers))
-        wts /= np.sum(wts)
-
-        # Calculate Portfolio Return and Risk
-        annual_return = np.sum(returns.mean() * wts) * 252
-        portfolio_std = np.sqrt(np.dot(wts.T, np.dot(returns.cov() * 252, wts)))
-
-        # Sharpe Ratio
-        sharpe_ratio = annual_return / portfolio_std
-
-        p_weights.append(wts)
-        p_returns.append(annual_return)
-        p_risks.append(portfolio_std)
-        p_sharpe.append(sharpe_ratio)
-
-    # Find Optimal Portfolio
-    max_sharpe_idx = np.argmax(p_sharpe)
-    optimal_weights = p_weights[max_sharpe_idx]
-
-    # Plot Efficient Frontier
-    fig, ax = plt.subplots()
-    scatter = ax.scatter(p_risks, p_returns, c=p_sharpe, cmap='viridis')
-    ax.scatter(p_risks[max_sharpe_idx], p_returns[max_sharpe_idx], color='r', marker='*', s=200, label='Optimal Portfolio')
-    ax.set_title('Efficient Frontier')
-    ax.set_xlabel('Risk (Standard Deviation)')
-    ax.set_ylabel('Return')
+    
+    results = {
+        'weights': [],
+        'returns': [],
+        'risks': [],
+        'sharpe': []
+    }
+    
+    for _ in range(n_scenarios):
+        weights = np.random.random(len(tickers))
+        weights /= weights.sum()
+        
+        portfolio_return = (returns.mean() * weights).sum() * 252
+        portfolio_risk = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
+        sharpe_ratio = portfolio_return / portfolio_risk
+        
+        results['weights'].append(weights)
+        results['returns'].append(portfolio_return)
+        results['risks'].append(portfolio_risk)
+        results['sharpe'].append(sharpe_ratio)
+    
+    # Find optimal portfolio
+    optimal_idx = np.argmax(results['sharpe'])
+    optimal_weights = results['weights'][optimal_idx]
+    
+    # Plot efficient frontier
+    fig, ax = plt.subplots(figsize=(10, 6))
+    scatter = ax.scatter(results['risks'], results['returns'], 
+                        c=results['sharpe'], cmap='plasma')
+    plt.colorbar(scatter, label='Sharpe Ratio')
+    ax.set_xlabel('Risk (Volatility)')
+    ax.set_ylabel('Expected Return')
+    ax.scatter(results['risks'][optimal_idx], results['returns'][optimal_idx], 
+               color='red', marker='*', s=500, label='Optimal Portfolio')
     ax.legend()
     st.pyplot(fig)
+    
+    # Display optimal allocation
+    st.success('Optimal Portfolio Allocation:')
+    optimal_allocation = pd.DataFrame({
+        'Stock': tickers,
+        'Weight': optimal_weights
+    })
+    st.table(optimal_allocation.round(4))
 
-    st.success(f'Optimal Weights: {dict(zip(tickers, np.round(optimal_weights, 2)))}')
+if __name__ == "__main__":
+    main()
