@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
 # configuring the display
-st.set_option('deprecation.showPyplotGlobalUse', False)
 #defining some functions
 @st.cache(allow_output_mutation=True)
 def portfolio_create(ticker,weight,data):
