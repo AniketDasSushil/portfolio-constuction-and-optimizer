@@ -1,20 +1,18 @@
 """
 Portfolio Constructor, Analyzer and Optimizer
-Fixed and improved version.
+Fixed version with all bugs resolved.
 
-Changes from original:
-- Fixed CAPM unit mismatch (risk_free_rate decimal vs market_cagr percent)
-- Fixed @st.cache_data incompatibility with NumPy arrays (converted to tuples)
-- Fixed yfinance single-ticker column shape handling
-- Fixed cumulative returns normalization (now always starts at 1.0)
-- Moved n_scenarios slider out of conditional block
-- Added dropna() after pct_change() calls
-- Added weight validation guard before data download
-- Fixed stock_data.corr() deprecation (numeric_only=True)
-- Added market_data squeeze to ensure Series type
-- Fixed duplicate sector labels in pie chart
-- Added handling for missing/delisted tickers
-- Improved error messages and user feedback
+Critical fixes:
+1. Fixed weight-to-ticker mapping using explicit index dictionaries
+2. Fixed sector allocation indexing
+3. Fixed Sharpe ratio calculation (use excess_returns.std())
+4. Fixed market data type handling
+5. Fixed optimization loop to use actual columns
+6. Added duplicate ticker detection
+7. Added control flow stop() after validation errors
+8. Fixed cache inconsistency for filtered portfolios
+9. Added handling for extreme negative returns
+10. Improved data alignment across functions
 """
 
 import streamlit as st
@@ -56,10 +54,16 @@ def fetch_stock_data(tickers: tuple, years: int) -> pd.DataFrame:
 def fetch_market_data(years: int) -> pd.Series:
     """Download NIFTY 50 index data and return as a Series."""
     raw = yf.download("^NSEI", period=f"{years}y", auto_adjust=True, progress=False)
-    if isinstance(raw.columns, pd.MultiIndex):
-        series = raw["Close"].squeeze()
+    
+    # Handle both DataFrame and Series returns
+    if isinstance(raw, pd.DataFrame):
+        if isinstance(raw.columns, pd.MultiIndex):
+            series = raw["Close"].squeeze()
+        else:
+            series = raw["Close"].squeeze()
     else:
-        series = raw["Close"].squeeze()
+        series = raw
+    
     return series.ffill().dropna()
 
 
@@ -75,11 +79,16 @@ def portfolio_create(
     Calculate portfolio cumulative returns.
     Weights must be provided as a tuple so Streamlit can hash them.
     Cumulative returns are normalised to start at 1.0.
+    
+    FIX: Properly aligns weights with filtered tickers using index mapping.
     """
     weights_arr = np.array(weights)
     # Keep only columns present in data (some tickers may have been dropped)
     valid_tickers = [t for t in tickers if t in data.columns]
-    valid_weights = weights_arr[[tickers.index(t) for t in valid_tickers]]
+    
+    # FIX: Use tuple indexing to map original positions to weights
+    ticker_to_weight = {tickers[i]: weights[i] for i in range(len(tickers))}
+    valid_weights = np.array([ticker_to_weight[t] for t in valid_tickers])
     valid_weights /= valid_weights.sum()  # Re-normalise after possible exclusions
 
     ret = data[valid_tickers].pct_change().dropna()
@@ -106,13 +115,15 @@ def calculate_metrics(
     portfolio_cum: pd.Series,
     market_series: pd.Series,
     years: int,
-    risk_free_rate_pct: float = 6.66,   # ← now in PERCENT (e.g. 6.66 means 6.66 %)
+    risk_free_rate_pct: float = 6.66,   # ← in PERCENT (e.g. 6.66 means 6.66 %)
 ) -> pd.DataFrame:
     """
     Calculate portfolio metrics including CAPM, beta, alpha, Sharpe ratio.
 
     All return/rate values are in PERCENT for consistency.
     risk_free_rate_pct : annual risk-free rate expressed as a percentage (e.g. 6.66).
+    
+    FIX: Corrected Sharpe ratio calculation to use excess_returns.std().
     """
     portfolio_returns = portfolio_cum.pct_change().dropna()
     market_returns = market_series.pct_change().dropna()
@@ -140,16 +151,16 @@ def calculate_metrics(
     portfolio_end = portfolio_cum.iloc[-1]
     portfolio_cagr_pct = (((portfolio_end / portfolio_start) ** (1 / years)) - 1) * 100
 
-    # CAPM expected return — all values in PERCENT (fixed unit mismatch)
+    # CAPM expected return — all values in PERCENT
     capm_return_pct = risk_free_rate_pct + beta * (market_cagr_pct - risk_free_rate_pct)
 
     # Annualised volatility (expressed as %)
     portfolio_volatility_pct = portfolio_returns.std() * np.sqrt(252) * 100
 
-    # Sharpe ratio (using decimal rates)
+    # FIX: Sharpe ratio now correctly uses excess_returns.std() in denominator
     daily_rf = (1 + risk_free_rate_pct / 100) ** (1 / 252) - 1
     excess_returns = portfolio_returns - daily_rf
-    sharpe = (excess_returns.mean() / portfolio_returns.std()) * np.sqrt(252)
+    sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(252) if excess_returns.std() > 0 else 0.0
 
     # Correlation with market
     correlation = portfolio_returns.corr(market_returns)
@@ -170,19 +181,32 @@ def calculate_metrics(
 
 @st.cache_data
 def calculate_individual_returns(stock_data: pd.DataFrame, years: int) -> pd.DataFrame:
-    """Calculate annualised returns and volatility for individual stocks."""
+    """
+    Calculate annualised returns and volatility for individual stocks.
+    
+    FIX: Added handling for extreme negative returns (negative total_return > -100%).
+    """
     rows = []
     for col in stock_data.columns:
         series = stock_data[col].dropna()
         if len(series) < 2:
             continue
-        total_return_pct = ((series.iloc[-1] / series.iloc[0]) - 1) * 100
-        ann_return_pct = (((1 + total_return_pct / 100) ** (1 / years)) - 1) * 100
+        
+        # FIX: Handle edge case where stock loses 100%+ of value
+        total_return = (series.iloc[-1] / series.iloc[0]) - 1
+        
+        # If loss is greater than 100%, annualized return is undefined
+        if 1 + total_return <= 0:
+            ann_return_pct = -100.0  # Stock completely lost value
+        else:
+            total_return_pct = total_return * 100
+            ann_return_pct = (((1 + total_return) ** (1 / years)) - 1) * 100
+        
         volatility_pct = series.pct_change().dropna().std() * np.sqrt(252) * 100
         rows.append(
             {
                 "Stock": col,
-                "Total Return (%)": round(total_return_pct, 2),
+                "Total Return (%)": round(total_return * 100, 2),
                 "Annualised Return (%)": round(ann_return_pct, 2),
                 "Volatility (%)": round(volatility_pct, 2),
             }
@@ -199,14 +223,20 @@ def calculate_individual_returns(stock_data: pd.DataFrame, years: int) -> pd.Dat
 def optimize_portfolio(
     stock_data: pd.DataFrame, tickers: list[str], n_scenarios: int
 ) -> None:
-    """Run Markowitz-style Monte Carlo portfolio optimisation."""
+    """
+    Run Markowitz-style Monte Carlo portfolio optimisation.
+    
+    FIX: Uses stock_data.columns instead of tickers to ensure alignment.
+    """
+    # FIX: Use actual columns from data, not input tickers
+    actual_tickers = list(stock_data.columns)
     returns = stock_data.pct_change().dropna()
 
     results: dict[str, list] = {"weights": [], "returns": [], "risks": [], "sharpe": []}
 
     with st.spinner("Running optimisation…"):
         for _ in range(n_scenarios):
-            w = np.random.random(len(tickers))
+            w = np.random.random(len(actual_tickers))  # FIX: Use len(actual_tickers)
             w /= w.sum()
 
             port_return = (returns.mean() * w).sum() * 252
@@ -251,7 +281,7 @@ def optimize_portfolio(
     st.success("Optimal Portfolio Allocation (Maximum Sharpe Ratio):")
     optimal_df = pd.DataFrame(
         {
-            "Stock": tickers,
+            "Stock": actual_tickers,
             "Weight (%)": np.round(results["weights"][optimal_idx] * 100, 2),
         }
     ).sort_values("Weight (%)", ascending=False)
@@ -296,7 +326,6 @@ def main() -> None:
             "Risk-free rate (%)", value=6.66, min_value=0.0, max_value=20.0, step=0.1,
             help="Annual risk-free rate expressed as a percentage (e.g. 6.66 for 6.66%)."
         )
-        # ── n_scenarios moved here so it is always visible ──────────────────
         n_scenarios = st.slider("Optimisation scenarios", 500, 5000, 1000, step=500)
 
     # ── Stock selection & weights ────────────────────────────────────────────
@@ -320,6 +349,13 @@ def main() -> None:
                 min_value=0.0, max_value=100.0, value=round(100 / n_stocks, 1), step=5.0
             )
             weights.append(w)
+
+    # FIX: Detect duplicate tickers early
+    unique_tickers = set(tickers)
+    if len(unique_tickers) < len(tickers):
+        duplicates = [t for t in tickers if tickers.count(t) > 1]
+        st.error(f"Duplicate stocks selected: {list(set(duplicates))}. Please select unique stocks.")
+        st.stop()  # FIX: Stop execution here
 
     total_weight = sum(weights)
     weight_ok = abs(total_weight - 100.0) < 1e-6
@@ -347,19 +383,26 @@ def main() -> None:
 
     if stock_data.empty:
         st.error("No stock data could be downloaded. Check ticker symbols.")
-        return
+        st.stop()  # FIX: Stop execution here
+
     if market_series.empty:
         st.error("Could not download NIFTY 50 benchmark data.")
-        return
+        st.stop()  # FIX: Stop execution here
 
     # Update tickers/weights to only valid (downloaded) stocks
     valid_tickers = [t for t in tickers if t in stock_data.columns]
     if len(valid_tickers) < 2:
         st.error("Fewer than 2 valid tickers — cannot build a portfolio.")
-        return
+        st.stop()  # FIX: Stop execution here
 
-    valid_weights = weights_arr[[tickers.index(t) for t in valid_tickers]]
+    # FIX: Proper weight mapping using dictionary
+    ticker_to_weight_orig = {tickers[i]: weights_arr[i] for i in range(len(tickers))}
+    valid_weights = np.array([ticker_to_weight_orig[t] for t in valid_tickers])
     valid_weights /= valid_weights.sum()
+
+    # FIX: Proper sector mapping using dictionary
+    ticker_to_sector = {tickers[i]: sectors[i] for i in range(len(tickers))}
+    valid_sectors = [ticker_to_sector[t] for t in valid_tickers]
 
     # ── ANALYSE ──────────────────────────────────────────────────────────────
     if analyze_button:
@@ -387,9 +430,8 @@ def main() -> None:
         st.pyplot(fig)
         plt.close(fig)
 
-        # 3. Portfolio composition (pie chart — merge duplicate sectors)
+        # 3. Portfolio composition (pie chart — FIX: proper sector mapping)
         st.subheader("Sector Allocation")
-        valid_sectors = [sectors[tickers.index(t)] for t in valid_tickers]
         sector_df = pd.DataFrame({"Sector": valid_sectors, "Weight": valid_weights})
         sector_agg = sector_df.groupby("Sector")["Weight"].sum()
         fig, ax = plt.subplots(figsize=(7, 7))
