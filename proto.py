@@ -1,216 +1,132 @@
-"""
-Portfolio Constructor, Analyzer and Optimizer
-ULTRA-OPTIMIZED for Streamlit 1.50+ with session state caching.
-
-Key improvements:
-1. Removed ThreadPoolExecutor (causes thread leaks in Streamlit)
-2. Added session state caching (prevents redownloading)
-3. Simplified progress (single progress bar, no nested UI)
-4. Used @st.cache_resource for yfinance session
-5. All previous bug fixes included
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
-import time
 import logging
-
-# Suppress warnings and debug output
-logging.getLogger("yfinance").setLevel(logging.ERROR)
 import warnings
-warnings.filterwarnings('ignore')
+
+# Suppress debug output and warnings
+logging.getLogger("yfinance").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────
-# STREAMLIT CONFIG
+# STREAMLIT CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Portfolio Optimizer",
+    page_icon="🏦",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Initialize session state for caching
-if 'stock_data_cache' not in st.session_state:
-    st.session_state.stock_data_cache = None
-if 'market_data_cache' not in st.session_state:
-    st.session_state.market_data_cache = None
-if 'cache_params' not in st.session_state:
-    st.session_state.cache_params = None
-
 
 # ─────────────────────────────────────────────────────────────────────────
-# YFINANCE SESSION (Persistent across reruns)
+# DATA FETCHING (Batch downloads + Native Streamlit Caching)
 # ─────────────────────────────────────────────────────────────────────────
 
-@st.cache_resource
-def get_yfinance_session():
-    """Create a persistent yfinance session with caching."""
-    try:
-        from requests_cache import CachedSession
-        return CachedSession(
-            'yfinance_cache',
-            expire_after=3600,  # Cache for 1 hour
-            stale_if_error=True
-        )
-    except ImportError:
-        # Fallback if requests_cache not installed
-        import requests
-        return requests.Session()
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# DATA FETCHING (Simplified, no threading)
-# ─────────────────────────────────────────────────────────────────────────
-
+@st.cache_data(ttl=3600, show_spinner="📊 Fetching stock data from Yahoo Finance...")
 def fetch_stock_data(tickers: tuple, years: int) -> pd.DataFrame:
     """
-    Download stock data with smart caching.
-    Only downloads if not already in session state.
+    Download price histories in a single concurrent batch call.
+    Uses native Streamlit memory caching to prevent SQLite deadlocks.
     """
-    # Check if we have cached data for these exact parameters
-    cache_key = (tickers, years)
-    
-    if (st.session_state.stock_data_cache is not None and 
-        st.session_state.cache_params == cache_key):
-        st.info("✅ Using cached stock data")
-        return st.session_state.stock_data_cache
-    
-    session = get_yfinance_session()
-    st.write("📊 **Downloading stock prices...**")
-    progress_container = st.container()
-    progress_bar = progress_container.progress(0)
-    status_text = progress_container.empty()
-    
-    data_dict = {}
-    errors = []
-    
-    for i, ticker in enumerate(tickers):
-        try:
-            # Update progress
-            progress = (i + 1) / len(tickers)
-            progress_bar.progress(progress)
-            status_text.text(f"⏳ {ticker} ({i+1}/{len(tickers)})")
-            
-            # Download with timeout
-            raw = yf.download(
-                ticker,
-                period=f"{years}y",
-                auto_adjust=True,
-                progress=False,
-                timeout=30,
-                session=session
-            )
-            
-            if isinstance(raw, pd.DataFrame) and not raw.empty:
-                if "Close" in raw.columns:
-                    data_dict[ticker] = raw["Close"]
-                    status_text.text(f"✅ {ticker} ({i+1}/{len(tickers)})")
-            else:
-                errors.append(ticker)
-                status_text.text(f"❌ {ticker} - No data ({i+1}/{len(tickers)})")
-                
-        except Exception as e:
-            errors.append(f"{ticker}: {str(e)[:40]}")
-            status_text.text(f"❌ {ticker} - Error ({i+1}/{len(tickers)})")
-    
-    # Clean up progress bar
-    progress_bar.empty()
-    status_text.empty()
-    
-    if errors:
-        st.warning(f"⚠️ Failed to download: {', '.join(errors[:3])}")
-    
-    if not data_dict:
-        st.error("❌ No data downloaded. Check tickers and internet.")
-        return pd.DataFrame()
-    
-    # Combine and clean
-    data = pd.DataFrame(data_dict)
-    data = data.dropna(axis=1, how="all")
-    data = data.ffill().dropna()
-    
-    # Cache in session state
-    st.session_state.stock_data_cache = data
-    st.session_state.cache_params = cache_key
-    
-    return data
-
-
-def fetch_market_data(years: int) -> pd.Series:
-    """Download NIFTY 50 with session caching."""
-    if (st.session_state.market_data_cache is not None and
-        st.session_state.cache_params is not None):
-        return st.session_state.market_data_cache
-    
-    session = get_yfinance_session()
-    
+    ticker_list = list(tickers)
     try:
         raw = yf.download(
-            "^NSEI",
+            tickers=ticker_list,
             period=f"{years}y",
             auto_adjust=True,
             progress=False,
-            timeout=30,
-            session=session
+            timeout=25,
         )
-        
-        if isinstance(raw, pd.DataFrame):
-            series = raw["Close"].squeeze() if "Close" in raw.columns else pd.Series()
+
+        if raw.empty:
+            return pd.DataFrame()
+
+        # Handle modern yfinance MultiIndex output vs SingleIndex output
+        if "Close" in raw.columns:
+            close_data = raw["Close"]
+            if isinstance(close_data, pd.Series):
+                data = close_data.to_frame(name=ticker_list[0])
+            else:
+                data = close_data
         else:
-            series = raw
-        
-        series = series.ffill().dropna()
-        st.session_state.market_data_cache = series
-        return series
-        
+            data = raw
+
+        # Clean forward/backward fills and drop inactive tickers
+        data = data.dropna(axis=1, how="all").ffill().bfill().dropna()
+        return data
+
     except Exception as e:
-        st.error(f"❌ Could not download NIFTY 50: {str(e)[:100]}")
-        return pd.Series()
+        st.error(f"❌ Error fetching stock data: {str(e)}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner="📊 Fetching benchmark data (^NSEI)...")
+def fetch_market_data(years: int) -> pd.Series:
+    """Download NIFTY 50 benchmark data with automatic caching."""
+    try:
+        raw = yf.download(
+            tickers="^NSEI",
+            period=f"{years}y",
+            auto_adjust=True,
+            progress=False,
+            timeout=25,
+        )
+
+        if raw.empty:
+            return pd.Series(dtype=float)
+
+        if "Close" in raw.columns:
+            series = raw["Close"].squeeze()
+        else:
+            series = raw.squeeze()
+
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+
+        return series.ffill().bfill().dropna().rename("NIFTY 50")
+
+    except Exception as e:
+        st.error(f"❌ Could not download NIFTY 50: {str(e)}")
+        return pd.Series(dtype=float)
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# CALCULATIONS
+# PORTFOLIO CALCULATIONS
 # ─────────────────────────────────────────────────────────────────────────
 
 @st.cache_data
 def portfolio_create(
     tickers: tuple, weights: tuple, data: pd.DataFrame
 ) -> pd.Series:
-    """Calculate portfolio cumulative returns."""
-    weights_arr = np.array(weights, dtype=float)
+    """Calculate normalized portfolio cumulative returns."""
     valid_tickers = [t for t in tickers if t in data.columns]
-    
     if not valid_tickers:
-        return pd.Series()
-    
-    ticker_to_weight = {tickers[i]: weights_arr[i] for i in range(len(tickers))}
-    valid_weights = np.array([ticker_to_weight[t] for t in valid_tickers])
+        return pd.Series(dtype=float)
+
+    ticker_to_weight = dict(zip(tickers, weights))
+    valid_weights = np.array([ticker_to_weight[t] for t in valid_tickers], dtype=float)
     valid_weights /= valid_weights.sum()
 
     ret = data[valid_tickers].pct_change().dropna()
     if ret.empty:
-        return pd.Series()
-    
-    portfolio_returns = (ret * valid_weights).sum(axis=1)
-    cum_returns = (1 + portfolio_returns).cumprod()
-    cum_returns = cum_returns / cum_returns.iloc[0]
-    
-    return cum_returns.rename("Portfolio")
+        return pd.Series(dtype=float)
+
+    portfolio_daily_returns = (ret * valid_weights).sum(axis=1)
+    cum_returns = (1 + portfolio_daily_returns).cumprod()
+    return (cum_returns / cum_returns.iloc[0]).rename("Portfolio")
 
 
 @st.cache_data
-def calculate_cumulative_returns(data: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
-    """Calculate cumulative returns."""
-    ret = data.pct_change().dropna()
+def calculate_cumulative_returns(series: pd.Series) -> pd.Series:
+    """Calculate cumulative returns from a price series."""
+    ret = series.pct_change().dropna()
     cum = (1 + ret).cumprod()
-    if isinstance(cum, pd.Series):
-        return cum / cum.iloc[0]
-    return cum.div(cum.iloc[0])
+    return cum / cum.iloc[0]
 
 
 @st.cache_data
@@ -220,35 +136,32 @@ def calculate_metrics(
     years: int,
     risk_free_rate_pct: float = 6.66,
 ) -> pd.DataFrame:
-    """Calculate portfolio metrics."""
+    """Calculate portfolio financial statistics, CAPM Alpha, Beta, and Sharpe."""
     if portfolio_cum.empty or market_series.empty:
         return pd.DataFrame()
-    
-    portfolio_returns = portfolio_cum.pct_change().dropna()
-    market_returns = market_series.pct_change().dropna()
 
-    portfolio_returns, market_returns = portfolio_returns.align(
-        market_returns, join="inner"
-    )
+    port_daily_ret = portfolio_cum.pct_change().dropna()
+    mkt_daily_ret = market_series.pct_change().dropna()
 
-    if portfolio_returns.empty:
+    port_daily_ret, mkt_daily_ret = port_daily_ret.align(mkt_daily_ret, join="inner")
+    if len(port_daily_ret) < 2:
         return pd.DataFrame()
 
-    covariance = portfolio_returns.cov(market_returns)
-    market_variance = market_returns.var()
-    beta = covariance / market_variance if market_variance > 0 else 0
+    covariance = port_daily_ret.cov(mkt_daily_ret)
+    market_variance = mkt_daily_ret.var()
+    beta = covariance / market_variance if market_variance > 0 else 0.0
 
     market_cagr_pct = (((market_series.iloc[-1] / market_series.iloc[0]) ** (1 / years)) - 1) * 100
     portfolio_cagr_pct = (((portfolio_cum.iloc[-1] / portfolio_cum.iloc[0]) ** (1 / years)) - 1) * 100
 
     capm_return_pct = risk_free_rate_pct + beta * (market_cagr_pct - risk_free_rate_pct)
-    portfolio_volatility_pct = portfolio_returns.std() * np.sqrt(252) * 100
+    portfolio_volatility_pct = port_daily_ret.std() * np.sqrt(252) * 100
 
     daily_rf = (1 + risk_free_rate_pct / 100) ** (1 / 252) - 1
-    excess_returns = portfolio_returns - daily_rf
-    sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(252) if excess_returns.std() > 0 else 0.0
+    excess_returns = port_daily_ret - daily_rf
+    sharpe = (excess_returns.mean() / port_daily_ret.std()) * np.sqrt(252) if port_daily_ret.std() > 0 else 0.0
 
-    correlation = portfolio_returns.corr(market_returns)
+    correlation = port_daily_ret.corr(mkt_daily_ret)
 
     metrics = {
         "Beta": beta,
@@ -266,21 +179,17 @@ def calculate_metrics(
 
 @st.cache_data
 def calculate_individual_returns(stock_data: pd.DataFrame, years: int) -> pd.DataFrame:
-    """Calculate individual stock returns."""
+    """Calculate total return, CAGR, and volatility per stock."""
     rows = []
     for col in stock_data.columns:
         series = stock_data[col].dropna()
         if len(series) < 2:
             continue
-        
+
         total_return = (series.iloc[-1] / series.iloc[0]) - 1
-        
-        if 1 + total_return <= 0:
-            ann_return_pct = -100.0
-        else:
-            ann_return_pct = (((1 + total_return) ** (1 / years)) - 1) * 100
-        
+        ann_return_pct = (((1 + max(total_return, -0.9999)) ** (1 / years)) - 1) * 100
         volatility_pct = series.pct_change().dropna().std() * np.sqrt(252) * 100
+
         rows.append({
             "Stock": col,
             "Total Return (%)": round(total_return * 100, 2),
@@ -290,160 +199,162 @@ def calculate_individual_returns(stock_data: pd.DataFrame, years: int) -> pd.Dat
 
     if not rows:
         return pd.DataFrame()
-    
+
     df = pd.DataFrame(rows)
     return df.sort_values("Annualised Return (%)", ascending=False).reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# OPTIMIZATION
+# VECTORIZED MONTE CARLO OPTIMIZATION
 # ─────────────────────────────────────────────────────────────────────────
 
 @st.cache_data
-def run_optimization(stock_data_cols: tuple, stock_data_values: tuple, n_scenarios: int) -> dict:
-    """Run Monte Carlo optimization (cached)."""
-    # Reconstruct DataFrame from cache-safe tuples
-    stock_data = pd.DataFrame(
-        {col: np.array(vals) for col, vals in zip(stock_data_cols, stock_data_values)}
-    )
-    
-    actual_tickers = list(stock_data.columns)
+def run_optimization(stock_data: pd.DataFrame, n_scenarios: int) -> dict:
+    """
+    Vectorized Monte Carlo optimization using matrix operations.
+    Executes in milliseconds compared to iterative Python loops.
+    """
+    tickers = list(stock_data.columns)
+    n_assets = len(tickers)
     returns = stock_data.pct_change().dropna()
 
-    results = {"weights": [], "returns": [], "risks": [], "sharpe": []}
+    mean_returns = returns.mean().values * 252
+    cov_matrix = returns.cov().values * 252
 
-    for _ in range(n_scenarios):
-        w = np.random.random(len(actual_tickers))
-        w /= w.sum()
+    # Generate random weights in bulk
+    weights_matrix = np.random.random((n_scenarios, n_assets))
+    weights_matrix /= weights_matrix.sum(axis=1, keepdims=True)
 
-        port_return = (returns.mean() * w).sum() * 252
-        port_risk = np.sqrt(np.dot(w.T, np.dot(returns.cov() * 252, w)))
-        sharpe = port_return / port_risk if port_risk > 0 else 0.0
+    # Vectorized return, volatility, and Sharpe computations
+    portfolio_returns = np.sum(weights_matrix * mean_returns, axis=1)
+    portfolio_risks = np.sqrt(np.einsum("ij,jk,ik->i", weights_matrix, cov_matrix, weights_matrix))
+    sharpe_ratios = np.where(portfolio_risks > 0, portfolio_returns / portfolio_risks, 0.0)
 
-        results["weights"].append(w)
-        results["returns"].append(port_return)
-        results["risks"].append(port_risk)
-        results["sharpe"].append(sharpe)
+    optimal_idx = int(np.argmax(sharpe_ratios))
 
-    optimal_idx = int(np.argmax(results["sharpe"]))
-    
     return {
-        "tickers": actual_tickers,
+        "tickers": tickers,
         "optimal_idx": optimal_idx,
-        "results": results,
+        "weights": weights_matrix,
+        "returns": portfolio_returns,
+        "risks": portfolio_risks,
+        "sharpe": sharpe_ratios,
     }
 
 
-def optimize_portfolio(stock_data: pd.DataFrame, tickers: list[str], n_scenarios: int) -> None:
-    """Run optimization with progress."""
-    actual_tickers = list(stock_data.columns)
-    
-    # Convert to hashable tuples for caching
-    cols_tuple = tuple(actual_tickers)
-    vals_tuple = tuple(stock_data[col].values for col in actual_tickers)
-    
-    st.write(f"🎯 Running {n_scenarios:,} simulations...")
-    
-    opt_result = run_optimization(cols_tuple, vals_tuple, n_scenarios)
-    results = opt_result["results"]
+def optimize_portfolio(stock_data: pd.DataFrame, n_scenarios: int) -> None:
+    """Run optimization and display frontier graph and allocation breakdown."""
+    st.write(f"🎯 Running **{n_scenarios:,}** vectorized simulations...")
+    opt_result = run_optimization(stock_data, n_scenarios)
+
+    tickers = opt_result["tickers"]
     optimal_idx = opt_result["optimal_idx"]
-    
-    # Plot efficient frontier
-    fig, ax = plt.subplots(figsize=(11, 6))
+    risks = opt_result["risks"]
+    returns = opt_result["returns"]
+    sharpe = opt_result["sharpe"]
+    optimal_weights = opt_result["weights"][optimal_idx]
+
+    # Efficient Frontier Scatter Plot
+    fig, ax = plt.subplots(figsize=(11, 5.5))
     sc = ax.scatter(
-        results["risks"],
-        results["returns"],
-        c=results["sharpe"],
-        cmap="plasma",
+        risks,
+        returns * 100,
+        c=sharpe,
+        cmap="viridis",
         alpha=0.6,
-        s=15,
+        s=18,
     )
     plt.colorbar(sc, ax=ax, label="Sharpe Ratio")
+
     ax.scatter(
-        results["risks"][optimal_idx],
-        results["returns"][optimal_idx],
+        risks[optimal_idx],
+        returns[optimal_idx] * 100,
         color="red",
         marker="*",
-        s=700,
-        label="Optimal",
+        s=500,
+        label="Optimal (Max Sharpe)",
         zorder=5,
-        edgecolors="darkred",
-        linewidth=2
+        edgecolors="black",
+        linewidth=1.5,
     )
-    ax.set_xlabel("Risk (Volatility)", fontsize=12)
-    ax.set_ylabel("Return (CAGR %)", fontsize=12)
-    ax.set_title("Efficient Frontier", fontsize=14, fontweight="bold")
-    ax.legend(fontsize=11)
+    ax.set_xlabel("Annualized Volatility (Risk)", fontsize=11)
+    ax.set_ylabel("Expected Return (CAGR %)", fontsize=11)
+    ax.set_title("Markowitz Efficient Frontier", fontsize=13, fontweight="bold")
+    ax.legend(loc="upper left")
     ax.grid(alpha=0.3)
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
 
-    # Allocation table
-    st.success("✅ Optimal Portfolio (Maximum Sharpe Ratio)")
+    # Optimal Allocation Table
+    st.success("✅ Optimal Portfolio Allocation (Maximum Sharpe Ratio)")
     optimal_df = pd.DataFrame({
-        "Stock": actual_tickers,
-        "Weight (%)": np.round(results["weights"][optimal_idx] * 100, 2),
-    }).sort_values("Weight (%)", ascending=False)
-    st.dataframe(optimal_df, use_container_width=True)
+        "Stock": tickers,
+        "Optimal Weight (%)": np.round(optimal_weights * 100, 2),
+    }).sort_values("Optimal Weight (%)", ascending=False).reset_index(drop=True)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Sharpe Ratio", f"{results['sharpe'][optimal_idx]:.4f}")
-    col2.metric("Expected Return", f"{results['returns'][optimal_idx]*100:.2f}%")
-    col3.metric("Risk (Volatility)", f"{results['risks'][optimal_idx]*100:.2f}%")
+    col_tbl, col_metrics = st.columns([1, 1])
+    with col_tbl:
+        st.dataframe(optimal_df, use_container_width=True)
+
+    with col_metrics:
+        st.metric("Optimal Sharpe Ratio", f"{sharpe[optimal_idx]:.4f}")
+        st.metric("Expected Annual Return", f"{returns[optimal_idx] * 100:.2f}%")
+        st.metric("Expected Volatility", f"{risks[optimal_idx] * 100:.2f}%")
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# MAIN APP
+# MAIN APPLICATION
 # ─────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     st.title("🏦 Portfolio Constructor & Optimizer")
-    st.write("*Fast, reliable portfolio analysis using cached data*")
+    st.caption("Perform rapid portfolio risk-adjusted return analysis and frontier optimization.")
 
-    # Load symbols
+    # Load symbol universe
     try:
         sym = pd.read_csv("sym.csv")
-        sym.columns = [col.replace(" ", "_") for col in sym.columns]
+        sym.columns = [col.strip().replace(" ", "_") for col in sym.columns]
     except FileNotFoundError:
-        st.error("❌ 'sym.csv' not found. Place it in the working directory.")
+        st.error("❌ `sym.csv` was not found. Please place `sym.csv` in the root working directory.")
         return
 
     required_cols = {"NAME_OF_COMPANY", "SYMBOL", "SECTOR"}
     if not required_cols.issubset(sym.columns):
-        st.error(f"❌ sym.csv missing: {required_cols}")
+        st.error(f"❌ `sym.csv` is missing required columns: {required_cols - set(sym.columns)}")
         return
 
-    # Sidebar settings
+    # Sidebar parameters
     with st.sidebar:
         st.header("⚙️ Settings")
-        n_stocks = st.slider("Number of stocks", 2, 20, 5)
-        years = st.slider("Data period (years)", 1, 20, 5)
+        n_stocks = st.slider("Number of stocks", min_value=2, max_value=15, value=5)
+        years = st.slider("Historical Data (Years)", min_value=1, max_value=15, value=5)
         risk_free_rate_pct = st.number_input(
             "Risk-free rate (%)", value=6.66, min_value=0.0, max_value=20.0, step=0.1
         )
-        n_scenarios = st.slider("Optimization scenarios", 500, 5000, 1000, step=500)
-        
+        n_scenarios = st.select_slider(
+            "Monte Carlo Scenarios", options=[1000, 2500, 5000, 10000, 20000], value=5000
+        )
+
         st.divider()
-        if st.button("🔄 Clear Cache", use_container_width=True):
-            st.session_state.stock_data_cache = None
-            st.session_state.market_data_cache = None
-            st.session_state.cache_params = None
+        if st.button("🔄 Clear App Cache", use_container_width=True):
+            st.cache_data.clear()
             st.rerun()
 
-    # Stock selection
+    # Asset selector and weight input
     st.subheader("📈 Build Portfolio")
-    tickers = []
-    weights = []
-    sectors = []
+    tickers, weights, sectors = [], [], []
 
-    cols = st.columns(n_stocks)
-    for i, col in enumerate(cols):
+    company_names = sym["NAME_OF_COMPANY"].tolist()
+    default_weight = round(100.0 / n_stocks, 1)
+
+    stock_cols = st.columns(n_stocks)
+    for i, col in enumerate(stock_cols):
         with col:
             name = st.selectbox(
                 f"Stock {i+1}",
-                sym["NAME_OF_COMPANY"],
-                key=f"stock_{i}",
-                label_visibility="collapsed"
+                options=company_names,
+                index=i % len(company_names),
+                key=f"stock_select_{i}",
             )
             row = sym[sym["NAME_OF_COMPANY"] == name].iloc[0]
             tickers.append(f"{row['SYMBOL']}.NS")
@@ -453,91 +364,81 @@ def main() -> None:
     for i, col in enumerate(weight_cols):
         with col:
             w = st.number_input(
-                f"Weight",
+                f"Weight %",
                 min_value=0.0,
                 max_value=100.0,
-                value=round(100 / n_stocks, 1),
+                value=default_weight,
                 step=1.0,
-                key=f"weight_{i}",
-                label_visibility="collapsed"
+                key=f"weight_input_{i}",
             )
             weights.append(w)
 
-    # Validation
-    unique_tickers = set(tickers)
-    if len(unique_tickers) < len(tickers):
-        duplicates = list(set([t for t in tickers if tickers.count(t) > 1]))
-        st.error(f"❌ Duplicate stocks: {duplicates}")
-        st.stop()
-
-    total_weight = sum(weights)
-    weight_ok = abs(total_weight - 100.0) < 1e-6
-
-    if not weight_ok:
-        st.error(f"⚠️ Total weight is {total_weight:.1f}% (need 100%)")
-        st.stop()
-
-    # Buttons
-    col1, col2, col3 = st.columns([1, 1, 2])
-    analyze_button = col1.button("📊 Analyse", use_container_width=True)
-    optimize_button = col2.button("🎯 Optimize", use_container_width=True)
-
-    if not (analyze_button or optimize_button):
+    # Pre-execution validation
+    if len(set(tickers)) < len(tickers):
+        st.error("❌ Duplicate stocks detected. Please select distinct assets.")
         return
 
-    # Download data
+    total_weight = sum(weights)
+    if not np.isclose(total_weight, 100.0, atol=0.5):
+        st.warning(f"⚠️ Total allocation equals **{total_weight:.1f}%**. Target is **100.0%**.")
+        return
+
+    # Trigger action buttons
+    btn_col1, btn_col2, _ = st.columns([1, 1, 3])
+    analyze_clicked = btn_col1.button("📊 Analyse Portfolio", use_container_width=True, type="primary")
+    optimize_clicked = btn_col2.button("🎯 Optimize Weights", use_container_width=True)
+
+    if not (analyze_clicked or optimize_clicked):
+        return
+
+    # Execute data download
     tickers_tuple = tuple(tickers)
-    weights_tuple = tuple(np.array(weights, dtype=float) / 100.0)
+    normalized_weights = tuple(np.array(weights, dtype=float) / 100.0)
 
     stock_data = fetch_stock_data(tickers_tuple, years)
     market_series = fetch_market_data(years)
 
     if stock_data.empty or market_series.empty:
-        st.error("❌ Could not download data. Try again or check tickers.")
-        st.stop()
+        st.error("❌ Failed to fetch historical prices. Verify symbol tickers and internet connectivity.")
+        return
 
     valid_tickers = [t for t in tickers if t in stock_data.columns]
     if len(valid_tickers) < 2:
-        st.error("❌ Less than 2 valid stocks.")
-        st.stop()
+        st.error("❌ Need at least 2 valid stocks with active price series.")
+        return
 
-    ticker_to_weight_orig = {tickers[i]: weights_tuple[i] for i in range(len(tickers))}
-    valid_weights = np.array([ticker_to_weight_orig[t] for t in valid_tickers])
+    ticker_to_weight = dict(zip(tickers, normalized_weights))
+    valid_weights = np.array([ticker_to_weight[t] for t in valid_tickers], dtype=float)
     valid_weights /= valid_weights.sum()
 
-    ticker_to_sector = {tickers[i]: sectors[i] for i in range(len(tickers))}
+    ticker_to_sector = dict(zip(tickers, sectors))
     valid_sectors = [ticker_to_sector[t] for t in valid_tickers]
 
-    # ANALYSE
-    if analyze_button:
-        st.info("📈 Calculating metrics...")
-        
-        portfolio_cum = portfolio_create(tickers_tuple, weights_tuple, stock_data)
+    # Portfolio Analysis Workflow
+    if analyze_clicked:
+        portfolio_cum = portfolio_create(tickers_tuple, normalized_weights, stock_data)
         if portfolio_cum.empty:
-            st.error("❌ Could not create portfolio.")
-            st.stop()
+            st.error("❌ Unable to calculate portfolio performance.")
+            return
 
         tab1, tab2, tab3, tab4 = st.tabs(["Returns", "Metrics", "Stocks", "Allocations"])
 
         with tab1:
-            # Portfolio vs Market
-            market_cum = calculate_cumulative_returns(market_series).rename("NIFTY 50")
+            market_cum = calculate_cumulative_returns(market_series)
             compare_df = pd.concat([portfolio_cum, market_cum], axis=1).dropna()
-            
-            fig, ax = plt.subplots(figsize=(12, 5))
-            compare_df.plot(ax=ax, linewidth=2.5)
-            ax.set_title("Cumulative Returns", fontsize=14, fontweight="bold")
-            ax.set_ylabel("Growth of ₹1")
+
+            fig, ax = plt.subplots(figsize=(11, 4.5))
+            compare_df.plot(ax=ax, linewidth=2.0)
+            ax.set_title("Cumulative Growth (Base ₹1.00)", fontsize=13, fontweight="bold")
+            ax.set_ylabel("Growth Factor")
             ax.axhline(1, color="grey", linestyle="--", alpha=0.5)
             ax.grid(alpha=0.3)
-            ax.legend(fontsize=11)
+            ax.legend(fontsize=10)
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
 
         with tab2:
-            metrics_df = calculate_metrics(
-                portfolio_cum, market_series, years, risk_free_rate_pct
-            )
+            metrics_df = calculate_metrics(portfolio_cum, market_series, years, risk_free_rate_pct)
             if not metrics_df.empty:
                 st.dataframe(metrics_df, use_container_width=True)
 
@@ -546,12 +447,11 @@ def main() -> None:
             if not ind_returns.empty:
                 st.dataframe(ind_returns, use_container_width=True)
 
-                fig, ax = plt.subplots(figsize=(12, 5))
-                colors = ["#2ecc71" if v >= 0 else "#e74c3c" 
-                         for v in ind_returns["Annualised Return (%)"]]
-                ax.bar(ind_returns["Stock"], ind_returns["Annualised Return (%)"], color=colors)
+                fig, ax = plt.subplots(figsize=(11, 4.5))
+                bar_colors = ["#2ecc71" if val >= 0 else "#e74c3c" for val in ind_returns["Annualised Return (%)"]]
+                ax.bar(ind_returns["Stock"], ind_returns["Annualised Return (%)"], color=bar_colors)
                 ax.axhline(0, color="black", linewidth=0.8)
-                ax.set_title("Annualised Returns by Stock", fontsize=14, fontweight="bold")
+                ax.set_title("Annualised Returns per Stock (CAGR %)", fontsize=13, fontweight="bold")
                 ax.set_ylabel("Return (%)")
                 ax.grid(alpha=0.3, axis="y")
                 plt.xticks(rotation=45)
@@ -562,18 +462,17 @@ def main() -> None:
         with tab4:
             sector_df = pd.DataFrame({"Sector": valid_sectors, "Weight": valid_weights})
             sector_agg = sector_df.groupby("Sector")["Weight"].sum()
-            
-            fig, ax = plt.subplots(figsize=(8, 8))
+
+            fig, ax = plt.subplots(figsize=(6, 6))
             colors = plt.cm.Set3(np.linspace(0, 1, len(sector_agg)))
-            ax.pie(sector_agg, labels=sector_agg.index, autopct="%1.1f%%",
-                   colors=colors, startangle=90)
-            ax.set_title("Sector Allocation", fontsize=14, fontweight="bold")
+            ax.pie(sector_agg, labels=sector_agg.index, autopct="%1.1f%%", colors=colors, startangle=90)
+            ax.set_title("Portfolio Sector Allocation", fontsize=13, fontweight="bold")
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
 
-    # OPTIMIZE
-    if optimize_button:
-        optimize_portfolio(stock_data[valid_tickers], valid_tickers, n_scenarios)
+    # Portfolio Optimization Workflow
+    if optimize_clicked:
+        optimize_portfolio(stock_data[valid_tickers], n_scenarios)
 
 
 if __name__ == "__main__":
